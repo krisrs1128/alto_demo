@@ -1,0 +1,294 @@
+---
+title: "Using `alto` on vaginal microbiome data"
+output: rmarkdown::html_vignette
+vignette: >
+  %\VignetteIndexEntry{Using `alto` on vaginal microbiome data}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+  
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+collapse = TRUE,
+comment = "#>"
+)
+```
+
+```{r setup}
+library(alto)
+library(dplyr)
+library(magrittr)
+library(ggplot2)
+library(tibble)
+library(stringr)
+library(tidyr)
+```
+
+
+This document showcases the `alto` package functions applied to vaginal microbiome data.
+
+## Loading the data
+
+We use the data published with the article ["Replication and refinement of a vaginal microbial signature of preterm birth in two racially distinct cohorts of US women"](https://www.pnas.org/content/114/37/9966.short) by Calahan et al., 2017, PNAS.
+
+A .zip file containing the related data can be downloaded from the [Stanford data catalog](https://stacks.stanford.edu/file/druid:yb681vm1809/RepRefine_Scripts.tar.gz).
+
+For convenience, the data file (i.e. the tables contained in the `processed.rda` file) has been attached to the `alto` package as `vm_data`. For details, type `?vm_data`.
+
+```{r show-names-of-provided-data}
+
+names(vm_data)
+
+```
+
+First, we do some pre-processing of the data. Specifically, we change the `colnames` to replace ASV DNA sequences by human-friendly names built from the taxonomy table.
+
+```{r human-friendly-ASV-names}
+
+# we create the human-friendly ASV names
+# by concatenating Genus and Species and an identifying number
+# as a given species can be represented by several ASVs
+vm_data$taxonomy <-
+  vm_data$taxonomy %>%
+  as.data.frame() %>%
+  group_by(Genus, Species) %>%
+  mutate(
+    ASV_name =
+      paste0(
+        ifelse(is.na(Genus),"[unknown Genus]", Genus), " (",
+        ifelse(is.na(Species),"?", Species), ") ",
+        row_number()
+      )
+  ) %>%
+  ungroup()
+
+# then, we replace the colnames of the count matrix by these new names.
+# Note that the tax table rows are ordered as the count matrix columns,
+# allowing us to assign without matching first.
+colnames(vm_data$counts) <-  vm_data$taxonomy$ASV_name
+
+```
+
+
+
+## Using `alto` on these data
+
+Our first step is to run the lda models for varying number of topics, i.e. from 1 to 18 topics.
+For this, we use the `run_lda_models` function. This can take a while on a personal computer.
+For example, it takes about 10 minutes on the authors' laptops.
+
+```{r run-lda-models}
+lda_varying_params_lists <-  list()
+for (k in 1:18) {lda_varying_params_lists[[paste0("k",k)]] <- list(k = k)}
+
+lda_models  <- 
+  run_lda_models(
+    data = vm_data$counts,
+    lda_varying_params_lists = lda_varying_params_lists,
+    lda_fixed_params_list = list(method = "VEM"),
+    dir = "microbiome_lda_models/",
+    reset = FALSE,
+    verbose = TRUE
+  )
+
+```
+
+We can now align the topics from each consecutive models:
+
+```{r align-topics}
+
+aligned_topics_product <- 
+  align_topics(
+    models = lda_models,
+    method = "product") # transport product
+
+aligned_topics_transport <- 
+  align_topics(
+    models = lda_models,
+    method = "transport") 
+
+```
+
+
+## Alignement visualization
+
+The alignments can be visualized with the `plot` function.
+
+```{r alignment-viz}
+plot(aligned_topics_product)
+plot(aligned_topics_transport)
+```
+
+
+## Key number of topics
+
+The number of key topics is computed with the function `compute_number_of_key_topics`. The function `plot_number_of_key_topics` can then be used to visualize that number across models.
+
+```{r key-number-of-topics}
+compute_number_of_paths(aligned_topics_product) %>% 
+  plot_number_of_paths() + 
+  ggtitle("Method: product")
+compute_number_of_paths(aligned_topics_transport) %>% 
+  plot_number_of_paths() + 
+  ggtitle("Method: transport")
+```
+
+The number of key topics shows a small plateau around K = 12 with both methods (product and transport). As in the simulations, the number of key topics are lower and the plateau is stronger when key topics are identified by the product than by the transport alignment. The fact that the plateau is small is likely indicative that the data generation process does not strictly follow the LDA model assumption. 
+
+We can then evaluate the coherence and ancestry scores of these topics with the `plot` function and the `color_by` option.
+
+## Alignment with diagnostics scores
+
+```{r coherence}
+plot(aligned_topics_product, color_by = "coherence")
+plot(aligned_topics_transport, color_by = "coherence")
+```
+
+Most of the identified topics around $K=12$ are coherent across $K$.
+
+
+```{r ancestry}
+plot(aligned_topics_product, color_by = "refinement")
+plot(aligned_topics_transport, color_by = "refinement")
+```
+
+
+
+Interestingly, by $K=7$, the identified topics correspond to the four Lactobacillus community state types (CST) and to three non-Lactobacillus topics. Among these, one topic, dominated by a specific strain of Gardnerella and Atopobium, remains coherent across models. The two remaining topics at $K=7$ have little overlap and high refinement scores, indicative that these topics successfully identify two distinct groups of communities, which are revealed as robust topics as $K$ is increased. 
+
+
+The function `plot_beta` allows to visualize the betas for a selection (or all) models.
+
+```{r beta-plot}
+plot_beta(aligned_topics_product, models = c("k3", "k7","k12","k18"), threshold = 0.005)
+plot_beta(aligned_topics_transport, models = c("k3", "k7","k12","k18"), threshold = 0.005)
+```
+
+By $K=18$ topics are sparse and share little overlap between them (Fig \ref{fig:microbiome_figure}d), which may reflect over-fitting.
+
+The `plot_beta` function also has a `color_by` option, which allows to visualize the coherence of topics.
+
+```{r}
+plot_beta(aligned_topics_transport, 
+          models = c("k3", "k7","k12","k18"), 
+          threshold = 0.005, 
+          color_by = "coherence")
+```
+
+
+
+
+
+```{r align-topics-viz-figure, echo = FALSE, eval = FALSE}
+
+
+figure_full = ggpubr::ggarrange(
+  g_key_topics_product,
+  g_key_topics_transport,
+  g_refinement_product,
+  g_refinement_transport,
+  g_robustness_product, 
+  g_robustness_transport,
+  g_branches_product,
+  g_branches_transport,
+  g_beta_product,
+  g_beta_transport,
+  ncol = 2,
+  nrow = 5,
+  heights = c(1.5,2,2,2,3)
+)
+
+ggsave(figure_full, filename = "microbiome_figure.png", height = 22, width = 18, units = "cm", scale = 2)
+
+
+```
+
+
+
+
+```{r align-topics-viz-figure-2, echo = FALSE, eval = FALSE}
+
+
+make_figure <- function(aligned_topics_product,
+                        aligned_topics_transport){
+  
+  
+  n_paths_combined <- 
+    bind_rows(
+      compute_number_of_paths(aligned_topics_product) %>% 
+        mutate(method = "product"),
+      compute_number_of_paths(aligned_topics_transport) %>% 
+        mutate(method = "transport")
+    )
+  
+  
+  g_key_topics <- 
+    ggplot(n_paths_combined, 
+           aes(x = n_topics,
+               y = n_paths,
+               col = method)) +
+    geom_abline(slope = 1, intercept = 0, col = "gray90", size = 2) +
+    geom_line() +
+    geom_point(size = 1) +
+    theme_minimal() +
+    xlab("# of topics in model") +
+    ylab("# of paths") +
+    scale_x_continuous(breaks = 1:max(n_paths_combined$n_topics), minor_breaks = NULL) +
+    scale_y_continuous(breaks = 1:max(n_paths_combined$n_topics), minor_breaks = NULL) +
+    theme(legend.position = "top")
+  
+  
+  g_coherence_transport <- 
+    plot_alignment(
+      aligned_topics_transport, 
+      color_by = "co", 
+      model_name_repair_fun = function(x) str_remove_all(x, "k")
+    ) + 
+    theme_minimal() +
+    theme(legend.position = "right")
+  
+  
+  g_branches_transport <- 
+    plot_alignment(
+      aligned_topics_transport, 
+      model_name_repair_fun = function(x) str_remove_all(x, "k")
+    ) +
+    theme_minimal() 
+  
+  
+  g_beta_transport <- 
+    plot_beta(
+      aligned_topics_transport, 
+      models = c("k3", "k7","k12",last(aligned_topics_transport@topics$m %>% levels())), 
+      threshold = 0.003
+    )
+  
+  figure = 
+    ggpubr::ggarrange(
+      ggpubr::ggarrange(
+        g_key_topics,
+        g_coherence_transport,
+        g_branches_transport,
+        ncol = 3, nrow = 1,
+        widths = c(3,5,4),
+        labels = "auto"),
+      g_beta_transport,
+      ncol = 1,
+      nrow = 2,
+      labels = c("","d")
+    )
+  
+  figure
+}
+
+aligned_topics_product_18 <- align_topics(lda_models[1:18], method = "product")
+aligned_topics_transport_18 <- align_topics(lda_models[1:18], method = "transport")
+
+figure_1_18 <- make_figure(aligned_topics_product = aligned_topics_product_18, 
+                           aligned_topics_transport = aligned_topics_transport_18)
+
+
+ggsave(figure_1_18, filename = "microbiome_figure.png", height = 14, width = 18, units = "cm", scale = 2)
+
+
+```
